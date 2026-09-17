@@ -211,6 +211,7 @@
     let allotment = 18;
     let pending = null;
     let busy = false;
+    let polling = false;
     let licenseTier = "preview";
     let armedModes = [];
     let upgradeLabel = "";
@@ -237,7 +238,7 @@
     function shouldFailover(message) {
       const text = String(message || "").toLowerCase();
       if (text.indexOf("instruction") !== -1 || text.indexOf("no compute shards") !== -1) return false;
-      return /quota|unavailable|exhausted|network|failed to fetch|429|mapper|origin/.test(text);
+      return /quota|unavailable|exhausted|network|failed to fetch|429|mapper|origin|timeout|abort/.test(text);
     }
     function synthesize(instruction) {
       const wantsUtility = /\b(check|diagnos|launch|utilit|environment|status|health|pass|node)\b/i.test(instruction);
@@ -293,12 +294,22 @@
       if (/^https?:\/\/pythonanywhere\.com\/?$/i.test(base)) {
         throw new Error("Use https://aetherlamenterprisecore.pythonanywhere.com — the marketing domain is not an API.");
       }
-      const res = await fetch(base + path, options);
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok || body.ok === false) {
-        throw new Error(body.error || ("Request failed (" + res.status + ")"));
+      const ctrl = new AbortController();
+      const timer = window.setTimeout(() => ctrl.abort(), 10000);
+      try {
+        const headers = Object.assign({ Accept: "application/json" }, (options && options.headers) || {});
+        const res = await fetch(base + path, Object.assign({}, options, { headers: headers, signal: ctrl.signal }));
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok || body.ok === false) {
+          throw new Error(body.error || ("Request failed (" + res.status + ")"));
+        }
+        return body;
+      } catch (err) {
+        if (err && err.name === "AbortError") throw new Error("Network timeout (10s). Mapper failover.");
+        throw err;
+      } finally {
+        window.clearTimeout(timer);
       }
-      return body;
     }
     function downloadDoc(title, body) {
       const safe = title.replace(/[^\w\s-]+/g, "").trim().replace(/\s+/g, "-") || "document";
@@ -391,7 +402,8 @@
       });
     }
     async function poll() {
-      if (pending || busy || !apiBase()) return;
+      if (pending || busy || polling || !apiBase()) return;
+      polling = true;
       try {
         const data = await api("/api/v1/agent/poll");
         if (data.task) {
@@ -400,9 +412,15 @@
         }
       } catch (err) {
         /* keep polling; origin may not be set yet */
+      } finally {
+        polling = false;
       }
     }
-    el("apiBase").value = sessionStorage.getItem("aether_api_base") || "https://aetherlamenterprisecore.pythonanywhere.com";
+    const storedOrigin = sessionStorage.getItem("aether_api_base") || "";
+    el("apiBase").value = /^https?:\/\/pythonanywhere\.com\/?$/i.test(storedOrigin)
+      ? "https://aetherlamenterprisecore.pythonanywhere.com"
+      : (storedOrigin || "https://aetherlamenterprisecore.pythonanywhere.com");
+    sessionStorage.setItem("aether_api_base", apiBase());
     el("apiBase").addEventListener("change", () => {
       sessionStorage.setItem("aether_api_base", apiBase());
       refreshLedger().catch((err) => log("err", err.message));
